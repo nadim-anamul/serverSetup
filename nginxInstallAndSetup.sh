@@ -18,8 +18,12 @@ sudo ufw allow 'Nginx HTTP'
 # Optionally, you can open the HTTPS port if you plan to use SSL/TLS
 # sudo ufw allow 'Nginx HTTPS'
 
+# Allow SSH connections
+sudo ufw allow ssh
+
 # Enable UFW
 sudo ufw enable
 
 # Inform the user about the completion of the process
 echo "Nginx has been installed and configured. You can access your server via its IP address in a web browser."
+echo "SSH access has also been allowed through the firewall."
