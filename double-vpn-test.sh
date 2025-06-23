@@ -58,16 +58,17 @@ cat > "$OUTPUT_DIR/server_b/wg0.conf" << EOF
 Address = ${SERVER_B_TUNNEL_2_IP}/24
 ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_B_PRIV_KEY}
-# Enable IP Forwarding and NAT
+# Enable IP Forwarding and NAT for the client's subnet (Tunnel 1)
 PostUp = sysctl -w net.ipv4.ip_forward=1
-PostUp = iptables -t nat -A POSTROUTING -s ${WG_TUNNEL_2_SUBNET} -o ${SERVER_B_MAIN_IFACE} -j MASQUERADE
-PreDown = iptables -t nat -D POSTROUTING -s ${WG_TUNNEL_2_SUBNET} -o ${SERVER_B_MAIN_IFACE} -j MASQUERADE
+PostUp = iptables -t nat -A POSTROUTING -s ${WG_TUNNEL_1_SUBNET} -o ${SERVER_B_MAIN_IFACE} -j MASQUERADE
+PreDown = iptables -t nat -D POSTROUTING -s ${WG_TUNNEL_1_SUBNET} -o ${SERVER_B_MAIN_IFACE} -j MASQUERADE
 PreDown = sysctl -w net.ipv4.ip_forward=0
 
 # Peer: Server A
 [Peer]
 PublicKey = ${SERVER_A_PUB_KEY}
-AllowedIPs = ${SERVER_A_TUNNEL_2_IP}/32
+# Allow return traffic to the client via Server A
+AllowedIPs = ${SERVER_A_TUNNEL_2_IP}/32, ${WG_TUNNEL_1_SUBNET}
 EOF
 
 # == SERVER A (ENTRY NODE) CONFIGS ==
