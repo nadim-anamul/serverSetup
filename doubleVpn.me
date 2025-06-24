@@ -1,0 +1,331 @@
+Of course. Here is a `README.md` file that consolidates all the necessary steps for setting up the double-hop VPN using the automation script. You can save this content to a file named `README.md` for future reference.
+
+# Double-Hop WireGuard VPN Setup Guide
+
+This guide provides the step-by-step instructions to deploy a secure, double-hop WireGuard VPN using two Ubuntu servers. The final traffic flow will be: `Your Device -> Server A (Entry) -> Server B (Exit) -> Internet`.
+
+This setup enhances privacy by ensuring that the entry server knows your IP but not your destination, while the exit server knows your destination but not your original IP.
+
+## Prerequisites
+
+1.  Two Ubuntu 22.04 LTS servers (referred to as Server A and Server B).
+2.  Root or `sudo` access on both servers.
+3.  A unique public IP address for each server.
+4.  `wireguard` and `iptables` installed on both servers (`sudo apt update && sudo apt install wireguard iptables -y`).
+
+-----
+
+## Step 1: Generate Configuration Files
+
+We will use an automated script to generate all necessary keys and configuration files. This script should be run on your local computer, not on the servers.
+
+1.  **Save the Script:**
+    Save the following bash script as `setup-double-vpn.sh` on your local machine.bash
+    \#\!/bin/bash
+
+    # 
+
+    # WireGuard Double-Hop VPN Configuration Generator
+
+    # 
+
+    # This script generates all necessary configuration files for a
+
+    # double-hop WireGuard setup involving a client, an entry server (A),
+
+    # and an exit server (B).
+
+    set -e
+    echo "--- WireGuard Double-Hop VPN Config Generator ---"
+
+    # \--- 1. GATHER USER INPUT ---
+
+    read -p "Enter Public IP for Server A (Entry Node): " SERVER\_A\_PUBLIC\_IP
+    read -p "Enter Public IP for Server B (Exit Node): " SERVER\_B\_PUBLIC\_IP
+    read -p "Enter Public Interface for Server A (e.g., eth0): " SERVER\_A\_MAIN\_IFACE
+    read -p "Enter Public Interface for Server B (e.g., eth0): " SERVER\_B\_MAIN\_IFACE
+    read -p "Enter WireGuard Port (e.g., 51820): " WG\_PORT
+
+    # Define subnets - these can be customized if needed
+
+    WG\_TUNNEL\_1\_SUBNET="10.100.1.0/24"
+    SERVER\_A\_TUNNEL\_1\_IP="10.100.1.1"
+    CLIENT\_TUNNEL\_1\_IP="10.100.1.10"
+
+    WG\_TUNNEL\_2\_SUBNET="10.100.2.0/24"
+    SERVER\_A\_TUNNEL\_2\_IP="10.100.2.2"
+    SERVER\_B\_TUNNEL\_2\_IP="10.100.2.1"
+
+    # \--- 2. PREPARE DIRECTORIES AND KEYS ---
+
+    echo "[+] Creating output directory and generating keys..."
+    OUTPUT\_DIR="double\_vpn\_configs"
+    rm -rf "$OUTPUT\_DIR"
+    mkdir -p "$OUTPUT\_DIR"/{server\_a,server\_b,client}
+
+    umask 077
+
+    # Server A Keys
+
+    wg genkey | tee "$OUTPUT\_DIR/server\_a/private.key" | wg pubkey \> "$OUTPUT\_DIR/server\_a/public.key"
+
+    # Server B Keys
+
+    wg genkey | tee "$OUTPUT\_DIR/server\_b/private.key" | wg pubkey \> "$OUTPUT\_DIR/server\_b/public.key"
+
+    # Client Keys
+
+    wg genkey | tee "$OUTPUT\_DIR/client/private.key" | wg pubkey \> "$OUTPUT\_DIR/client/public.key"
+
+    # Read keys into variables
+
+    SERVER\_A\_PRIV\_KEY=$(cat "$OUTPUT\_DIR/server\_a/private.key")
+    SERVER\_A\_PUB\_KEY=$(cat "$OUTPUT\_DIR/server\_a/public.key")
+    SERVER\_B\_PRIV\_KEY=$(cat "$OUTPUT\_DIR/server\_b/private.key")
+    SERVER\_B\_PUB\_KEY=$(cat "$OUTPUT\_DIR/server\_b/public.key")
+    CLIENT\_PRIV\_KEY=$(cat "$OUTPUT\_DIR/client/private.key")
+    CLIENT\_PUB\_KEY=$(cat "$OUTPUT\_DIR/client/public.key")
+
+    # \--- 3. GENERATE CONFIGURATION FILES ---
+
+    # \== SERVER B (EXIT NODE) CONFIG ==
+
+    echo "[+] Generating config for Server B (Exit Node)..."
+    cat \> "$OUTPUT\_DIR/server\_b/wg0.conf" \<\< EOF
+
+    # Configuration for Server B (Exit Node)
+
+    [Interface]
+    Address = ${SERVER\_B\_TUNNEL\_2\_IP}/24
+    ListenPort = ${WG\_PORT}
+    PrivateKey = ${SERVER\_B\_PRIV\_KEY}
+
+    # Enable IP Forwarding, add FORWARD rules, and set up NAT
+
+    PostUp = sysctl -w net.ipv4.ip\_forward=1
+    PostUp = iptables -A FORWARD -i %i -o ${SERVER\_B\_MAIN\_IFACE} -j ACCEPT
+    PostUp = iptables -A FORWARD -i ${SERVER\_B\_MAIN\_IFACE} -o %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    PostUp = iptables -t nat -A POSTROUTING -s ${WG\_TUNNEL\_1\_SUBNET} -o ${SERVER\_B\_MAIN\_IFACE} -j MASQUERADE
+    PreDown = iptables -t nat -D POSTROUTING -s ${WG\_TUNNEL\_1\_SUBNET} -o ${SERVER\_B\_MAIN\_IFACE} -j MASQUERADE
+    PreDown = iptables -D FORWARD -i ${SERVER\_B\_MAIN\_IFACE} -o %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    PreDown = iptables -D FORWARD -i %i -o ${SERVER\_B\_MAIN\_IFACE} -j ACCEPT
+    PreDown = sysctl -w net.ipv4.ip\_forward=0
+
+    # Peer: Server A
+
+    [Peer]
+    PublicKey = ${SERVER\_A\_PUB\_KEY}
+
+    # Allow return traffic to the client via Server A
+
+    AllowedIPs = ${SERVER\_A\_TUNNEL\_2\_IP}/32, ${WG\_TUNNEL\_1\_SUBNET}
+    EOF
+
+    # \== SERVER A (ENTRY NODE) CONFIGS ==
+
+    echo "[+] Generating configs for Server A (Entry Node)..."
+
+    # wg0 (Client-facing)
+
+    cat \> "$OUTPUT\_DIR/server\_a/wg0.conf" \<\< EOF
+
+    # Configuration for Server A - wg0 (Client-Facing)
+
+    [Interface]
+    Address = ${SERVER\_A\_TUNNEL\_1\_IP}/24
+    ListenPort = ${WG\_PORT}
+    PrivateKey = ${SERVER\_A\_PRIV\_KEY}
+
+    # Enable forwarding and setup policy routing rule for client traffic
+
+    PostUp = sysctl -w net.ipv4.ip\_forward=1
+    PostUp = iptables -A FORWARD -i %i -o wg1 -j ACCEPT
+    PostUp = iptables -A FORWARD -i wg1 -o %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    PostUp = ip rule add from ${WG\_TUNNEL\_1\_SUBNET%/*}/24 table 200
+    PreDown = ip rule del from ${WG\_TUNNEL\_1\_SUBNET%/*}/24 table 200
+    PreDown = iptables -D FORWARD -i wg1 -o %i -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    PreDown = iptables -D FORWARD -i %i -o wg1 -j ACCEPT
+
+    # Peer: End-User Client
+
+    [Peer]
+    PublicKey = ${CLIENT\_PUB\_KEY}
+    AllowedIPs = ${CLIENT\_TUNNEL\_1\_IP}/32
+    EOF
+
+    # wg1 (Exit-Node-facing)
+
+    cat \> "$OUTPUT\_DIR/server\_a/wg1.conf" \<\< EOF
+
+    # Configuration for Server A - wg1 (Exit-Node-Facing)
+
+    [Interface]
+    Table = off
+    Address = ${SERVER\_A\_TUNNEL\_2\_IP}/24
+    PrivateKey = ${SERVER\_A\_PRIV\_KEY}
+
+    # Add default route to the custom routing table
+
+    PostUp = ip route add default via ${SERVER\_B\_TUNNEL\_2\_IP} table 200
+    PreDown = ip route del default via ${SERVER\_B\_TUNNEL\_2\_IP} table 200
+
+    # Peer: Server B (Exit Node)
+
+    [Peer]
+    PublicKey = ${SERVER\_B\_PUB\_KEY}
+    Endpoint = ${SERVER\_B\_PUBLIC\_IP}:${WG\_PORT}
+    AllowedIPs = 0.0.0.0/0
+    PersistentKeepalive = 25
+    EOF
+
+    # \== CLIENT CONFIG ==
+
+    echo "[+] Generating config for the Client..."
+    cat \> "$OUTPUT\_DIR/client/client.conf" \<\< EOF
+
+    # Configuration for End-User Client
+
+    [Interface]
+    PrivateKey = ${CLIENT\_PRIV\_KEY}
+    Address = ${CLIENT\_TUNNEL\_1\_IP}/24
+    DNS = 1.1.1.1, 1.0.0.1
+
+    # Peer: Server A (Entry Node)
+
+    [Peer]
+    PublicKey = ${SERVER\_A\_PUB\_KEY}
+    Endpoint = ${SERVER\_A\_PUBLIC\_IP}:${WG\_PORT}
+    AllowedIPs = 0.0.0.0/0
+    PersistentKeepalive = 25
+    EOF
+
+    echo ""
+    echo "--- SUCCESS ---"
+    echo "Configuration files have been generated in the '$OUTPUT\_DIR' directory."
+
+    ```
+    
+    ```
+
+2.  **Make the script executable:**
+
+    ```sh
+    chmod +x setup-double-vpn.sh
+    ```
+
+3.  **Run the script:**
+    Follow the prompts to enter the public IPs and network interface names for your servers.
+
+    ```sh
+    ```
+
+./setup-double-vpn.sh
+\`\`\`
+This will create a directory named `double_vpn_configs` containing all the necessary files.
+
+-----
+
+## Step 2: Deploy Configuration Files
+
+Securely copy the generated files to their respective servers and move them into place.
+
+1.  **Copy files to Server A (Entry Node):**
+
+    ```sh
+    # Replace user@<SERVER_A_PUBLIC_IP> with your actual username and IP
+    scp double_vpn_configs/server_a/wg0.conf user@<SERVER_A_PUBLIC_IP>:/tmp/
+    scp double_vpn_configs/server_a/wg1.conf user@<SERVER_A_PUBLIC_IP>:/tmp/
+    ```
+
+2.  **Copy file to Server B (Exit Node):**
+
+    ```sh
+    # Replace user@<SERVER_B_PUBLIC_IP> with your actual username and IP
+    scp double_vpn_configs/server_b/wg0.conf user@<SERVER_B_PUBLIC_IP>:/tmp/
+    ```
+
+3.  **Move files on Server A:**
+    SSH into Server A and run:
+
+    ```sh
+    sudo mv /tmp/wg0.conf /etc/wireguard/
+    sudo mv /tmp/wg1.conf /etc/wireguard/
+    ```
+
+4.  **Move file on Server B:**
+    SSH into Server B and run:
+
+    ```sh
+    sudo mv /tmp/wg0.conf /etc/wireguard/
+    ```
+
+-----
+
+## Step 3: Final Server Configuration
+
+A one-time setup command is required on Server A to enable the policy-based routing.
+
+1.  **On Server A, create the custom routing table:**
+    SSH into Server A and run:
+    ```sh
+    echo "200 vpn_out" | sudo tee -a /etc/iproute2/rt_tables
+    ```
+
+-----
+
+## Step 4: Start the VPN Tunnels
+
+Start the tunnels in the correct order: Exit Node first, then Entry Node, then the Client.
+
+1.  **On Server B (Exit Node):**
+
+    ```sh
+    sudo wg-quick up wg0
+    ```
+
+2.  **On Server A (Entry Node):**
+
+    ```sh
+    sudo wg-quick up wg0
+    sudo wg-quick up wg1
+    ```
+
+3.  **On Your Device (Client):**
+
+      * Copy the contents of `double_vpn_configs/client/client.conf` or import the file directly into your WireGuard application.
+      * Activate the tunnel.
+
+-----
+
+## Step 5: Verification
+
+Confirm that the VPN chain is working correctly.
+
+1.  **Check Public IP:**
+    From your client device (with the tunnel active), check your public IP. It should match the public IP of **Server B**.
+
+    ```sh
+    curl ifconfig.me
+    ```
+
+2.  **Check Handshakes:**
+    Run `sudo wg show` on all three machines. You should see a recent `latest handshake` time for all active peers.
+
+3.  **Trace the Route:**
+    From your client device, trace the route to an internet destination. The first two hops should be the tunnel IPs of Server A (`10.100.1.1`) and Server B (`10.100.2.1`).
+
+    ```sh
+    traceroute 8.8.8.8
+    ```
+
+-----
+
+## Troubleshooting
+
+  * **`wg-quick: 'wg0' already exists` error:** If a `wg-quick down` command fails, the interface can get stuck. To fix this, run `sudo ip link delete dev wg0` on the affected server and then try `sudo wg-quick up wg0` again.
+  * **No Handshake:** Double-check that you have allowed UDP traffic on your chosen WireGuard port in your servers' firewalls (e.g., `sudo ufw allow 51820/udp`).
+
+<!-- end list -->
+
+```
+```
