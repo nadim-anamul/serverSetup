@@ -45,8 +45,8 @@ systemctl enable --now wg-quick@$WG_INTERFACE
 cat > /etc/tor/torrc <<EOF
 VirtualAddrNetworkIPv4 10.192.0.0/10
 AutomapHostsOnResolve 1
-TransPort 0.0.0.0:9040
-DNSPort 0.0.0.0:5353
+TransPort 10.8.0.1:9040
+DNSPort 10.8.0.1:5353
 RunAsDaemon 1
 ControlPort 127.0.0.1:9051
 SocksPort 127.0.0.1:9050
